@@ -1,29 +1,37 @@
 plugins {
-    id("com.android.application") version "8.9.2"
+    id("com.android.application") version "9.1.1"
+    id("org.jetbrains.kotlin.plugin.compose") version "2.2.10"
 }
 
 android {
     namespace = "org.bailu.gptsovits.tts"
-    compileSdk = 35
+    compileSdk = 37
+    buildToolsVersion = "37.0.0"
     ndkVersion = "29.0.14206865"
     defaultConfig {
         applicationId = "org.bailu.gptsovits.tts"
         minSdk = 28
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
         ndk { abiFilters += "arm64-v8a" }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    buildFeatures { compose = true }
     // Rust opens ORT by its absolute path in the installed app's library directory.
     packaging { jniLibs { useLegacyPackaging = true } }
     sourceSets["main"].jniLibs.srcDir(rootProject.file(".local/jni"))
     providers.gradleProperty("ttsDebugKeystore").orNull?.let {
         signingConfigs.getByName("debug").storeFile = rootProject.file(it)
     }
+}
+
+dependencies {
+    implementation("androidx.activity:activity-compose:1.12.4")
+    implementation("androidx.compose.material3:material3:1.5.0")
 }
 
 tasks.named("preBuild") {

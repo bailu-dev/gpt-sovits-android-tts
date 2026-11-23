@@ -3,6 +3,7 @@ use gpt_sovits_onnx_rs::{InferParams, LangId, PostprocessParams, TTSModel, Token
 use jni::{
     JNIEnv,
     objects::{JClass, JObject, JString, JValue},
+    sys::{JNI_FALSE, jboolean},
 };
 use std::{
     path::{Path, PathBuf},
@@ -16,6 +17,8 @@ use std::{
 
 struct Engine {
     bundle: PathBuf,
+    streaming: bool,
+    reference: Option<(PathBuf, String)>,
     model: TTSModel,
     params: InferParams,
 }
@@ -37,37 +40,55 @@ fn initialize_ort(library: &Path) -> Result<()> {
     Ok(())
 }
 
-fn prepare(bundle: &Path, library: &Path) -> Result<()> {
+fn prepare(
+    bundle: &Path,
+    library: &Path,
+    reference: Option<(PathBuf, String)>,
+    streaming: bool,
+) -> Result<()> {
     let mut cache = ENGINE.lock().unwrap_or_else(|error| error.into_inner());
-    if cache.as_ref().is_some_and(|engine| engine.bundle == bundle) {
-        return Ok(());
+    let mut engine = match cache.take() {
+        Some(engine) if engine.bundle == bundle && engine.streaming == streaming => engine,
+        previous => {
+            drop(previous);
+            initialize_ort(library)?;
+            let model = if streaming {
+                TTSModel::from_bundle_lazy_reference(bundle)?
+            } else {
+                TTSModel::new(
+                    bundle.join("vits_non_streaming.onnx"),
+                    bundle.join("ssl.onnx"),
+                    bundle.join("t2s_encoder.onnx"),
+                    bundle.join("t2s_fs_decoder.onnx"),
+                    bundle.join("t2s_s_decoder.onnx"),
+                    Some(bundle.join("bert.onnx")),
+                    Some(bundle.join("g2pW.onnx")),
+                    Some(bundle.join("g2p_en")),
+                    Some(bundle.join("sv.onnx")),
+                )?
+            };
+            ensure!(
+                model.has_streaming_vits() == streaming,
+                "The selected VITS graph does not match the requested synthesis mode"
+            );
+            Engine {
+                bundle: bundle.into(),
+                streaming,
+                reference: None,
+                model,
+                params: InferParams::from_bundle(bundle)?,
+            }
+        }
+    };
+    if reference != engine.reference {
+        if let Some((path, transcript)) = &reference {
+            engine
+                .model
+                .process_reference_sync(path, transcript, LangId::Auto)?;
+        }
+        engine.reference = reference;
     }
-
-    // Release the previous sessions before opening a second model in this process.
-    cache.take();
-    initialize_ort(library)?;
-
-    let params = InferParams::from_bundle(bundle)?;
-    let mut model = TTSModel::from_bundle_lazy_reference(bundle)?;
-    ensure!(
-        model.has_streaming_vits(),
-        "vits.onnx must expose stream_start_frame"
-    );
-
-    let transcript = std::fs::read_to_string(bundle.join("reference.txt"))
-        .context("Cannot read reference.txt")?;
-    ensure!(!transcript.trim().is_empty(), "reference.txt is empty");
-    model.process_reference_sync(
-        bundle.join("reference.wav"),
-        transcript.trim(),
-        LangId::Auto,
-    )?;
-
-    *cache = Some(Engine {
-        bundle: bundle.into(),
-        model,
-        params,
-    });
+    *cache = Some(engine);
     Ok(())
 }
 
@@ -82,26 +103,42 @@ fn stream_pcm(
     let cancelled = &cancelled;
 
     std::thread::scope(|scope| {
-        let worker = scope.spawn(move || {
-            engine.model.synthesize_token_chunks_sync(
-                text,
-                engine.params.to_sampling_params(),
-                LangId::Auto,
-                PostprocessParams::default(),
-                TokenStreamOptions {
-                    block_tokens: 8,
-                    vits_left_context_tokens: None,
-                },
-                || cancelled.load(Relaxed),
-                |_, samples| {
-                    let mut pcm = Vec::with_capacity(samples.len() * 2);
-                    for sample in samples {
-                        let value = (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
-                        pcm.extend_from_slice(&value.to_le_bytes());
+        let worker = scope.spawn(move || -> Result<()> {
+            let emit = |samples: &[f32]| {
+                let mut pcm = Vec::with_capacity(samples.len() * 2);
+                for sample in samples {
+                    let value = (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+                    pcm.extend_from_slice(&value.to_le_bytes());
+                }
+                send.send(pcm).is_ok()
+            };
+            let sampling = engine.params.to_sampling_params();
+            let postprocess = PostprocessParams::default();
+            if engine.streaming {
+                engine.model.synthesize_token_chunks_sync(
+                    text,
+                    sampling,
+                    LangId::Auto,
+                    postprocess,
+                    TokenStreamOptions {
+                        block_tokens: 16,
+                        vits_left_context_tokens: None,
+                    },
+                    || cancelled.load(Relaxed),
+                    |_, samples| emit(&samples),
+                )?;
+            } else if !cancelled.load(Relaxed) {
+                let (_, samples) =
+                    engine
+                        .model
+                        .synthesize_sync(text, sampling, LangId::Auto, postprocess)?;
+                for chunk in samples.chunks(8192) {
+                    if cancelled.load(Relaxed) || !emit(chunk) {
+                        break;
                     }
-                    send.send(pcm).is_ok()
-                },
-            )
+                }
+            }
+            Ok(())
         });
 
         // Android requires SynthesisCallback calls on its original synthesis thread.
@@ -149,16 +186,27 @@ fn run_jni(env: &mut JNIEnv<'_>, f: impl FnOnce(&mut JNIEnv<'_>) -> Result<()>) 
 }
 
 #[unsafe(no_mangle)]
-extern "system" fn Java_org_bailu_gptsovits_tts_NativeEngine_prepare(
+extern "system" fn Java_org_bailu_gptsovits_tts_NativeEngine_prepareModel(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
     bundle: JString<'_>,
     library: JString<'_>,
+    wav: JString<'_>,
+    transcript: JString<'_>,
+    streaming: jboolean,
 ) {
     run_jni(&mut env, |env| {
         let bundle: String = env.get_string(&bundle)?.into();
         let library: String = env.get_string(&library)?.into();
-        prepare(Path::new(&bundle), Path::new(&library))
+        let wav: String = env.get_string(&wav)?.into();
+        let transcript: String = env.get_string(&transcript)?.into();
+        let reference = (!wav.is_empty()).then(|| (PathBuf::from(wav), transcript));
+        prepare(
+            Path::new(&bundle),
+            Path::new(&library),
+            reference,
+            streaming != JNI_FALSE,
+        )
     });
 }
 
