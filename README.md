@@ -1,91 +1,73 @@
-# GPT-SoVITS Android TTS
+# GPT-SoVITS ONNX RS Android Demo
 
-这个项目把 [GPT-SoVITS ONNX RS](https://github.com/bailu-obj/gpt-sovits-onnx-rs) 接入 Android。
-它既是一个语音试听和性能测试工具，也是一个可供阅读器等 App 调用的 Android 文字转语音引擎。
-用途是在手机上验证模型、参考音和合成模式的组合，确认能否满足交互朗读的延迟要求。
+这是 [GPT-SoVITS ONNX RS](https://github.com/bailu-obj/gpt-sovits-onnx-rs) 的 Android 示例，
+包含语音试听和系统 TTS 两个入口。可以在 App 里输入文字、
+更换参考音，并比较流式和整段合成的延迟。将它设为系统语音引擎后，阅读器等使用 Android TTS
+的应用也会使用同一份模型、参考音和合成模式。App 顶栏的「原项目」打开引擎仓库。
 
-## 功能
+## 在手机上使用
 
-| 功能 | 用途 |
-| --- | --- |
-| 文本试听与性能 | 输入文本，切换流式或整段，查看首块 PCM、合成与交付耗时、音频时长和实时率 |
-| 参考音管理 | 选择 WAV、编辑对应的转录、查看和播放当前参考音，或切回模型包提供的音色 |
-| 系统 TTS | 安装后可选为 Android 首选语音引擎，使用当前的模型、音色和合成模式 |
-| 模型导入 | 单独导入模型 ZIP，查看解压和载入状态，在通过校验后启用模型 |
+手机需要 Android 9 或更新版本和 arm64 CPU。开发机需要 `adb` 和 Hugging Face CLI（`hf`）。
+先[构建 APK](#构建-apk)，再从
+[Hugging Face 模型仓库](https://huggingface.co/mikv39/gpt-sovits-onnx-custom)下载 `mobile/`，
+将下载后的整个目录推送到 App 的外部文件目录。
 
-## 技术结构
+```bash
+hf download mikv39/gpt-sovits-onnx-custom \
+  --include 'mobile/**' --local-dir models/gpt-sovits
 
-界面用 Kotlin 和 Jetpack Compose Material 3 实现。应用内试听通过 Android
-`TextToSpeech` 访问本应用的 `TextToSpeechService`，因此与系统客户端共用同一条音频路径。
-
-```text
-应用内试听 / Android TTS 客户端
-    → TextToSpeechService
-    → JNI → GPT-SoVITS ONNX RS → ONNX Runtime CPU
-    ← 32 kHz 单声道 PCM16
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+TARGET=/sdcard/Android/data/org.bailu.gptsovits.tts/files/models
+adb shell mkdir -p "$TARGET"
+adb push -Z models/gpt-sovits/mobile "$TARGET/"
+adb shell chmod o+rx "$TARGET"
+adb shell chmod -R o+rX "$TARGET/mobile"
 ```
 
-Rust 引擎加载文本前端、T2S 和 VITS。参考音和转录用于准备语义提示与音色条件，
-T2S 根据请求文本产生语义 token，VITS 将 token 转成波形。流式模式在 T2S 继续解码时按块交付
-PCM，整段模式先合成整份波形，再把 PCM 送给 Android 播放或写入文件。
+1. 打开 **GPT-SoVITS TTS**，点「选择模型文件夹」，选择刚推送的 `mobile`，等待模型载入。
+2. 在页面底部的「参考音」选择一段 WAV，并填写这段录音的准确转录。这里也可以查看和播放当前参考音。
+3. 在「试听与性能」输入文字、选择流式或整段，然后点击「播放」。引擎首块延迟和合成耗时会出现在
+   播放按钮下方。
+4. 要验证系统调用，点「系统 TTS」，选 **GPT-SoVITS TTS** 为首选引擎，然后在系统设置中播放示例。
 
-## 模型与音色
+## 构建 APK
 
-Android 部署使用 **v2Pro `mobile`** 配置。Bailu Android 使用量化文本前端和 T2S，以及
-Adaptive 流式 VITS。Demo 的流式首块与 Bailu 一样从 16 个语义 token 起步。引擎子模块固定在
-`b0f2c5a`，部署模型和参考音以 ZIP 独立分发。
-
-按[引擎导出指南](vendor/gpt-sovits-onnx-rs/scripts/README.md)生成 v2Pro `mobile` 模型和流式包。
-将同一套权重导出的普通 VITS 图以 `vits_non_streaming.onnx` 放进流式目录即可启用整段模式。
-拆分参考图的两个 VITS 使用相同的 `vits_ref.onnx`。ZIP 根目录布局如下。
-
-```text
-vits.onnx
-vits_ref.onnx
-vits_non_streaming.onnx     可选，用于整段合成
-bert.onnx、g2pW.onnx、ssl.onnx、sv.onnx、t2s_*.onnx
-g2p_en/                    英文 G2P 模型
-infer_params.json          可选，采样参数
-reference.wav              可选，模型包提供的参考音
-reference.txt              参考音转录，与 reference.wav 成对提供
-reference_name.txt         可选，参考音的显示名称
-```
-
-ONNX 引用的外部权重文件保留原相对路径。参考音建议使用 3–10 秒的单声道 PCM16 WAV。
-项目当前在 S25 Ultra 上的验证使用 Bailu Android 部署模型，以及 Bailu 试听选中的
-`bailu-09.wav` 和配套转录。
-
-## 构建与运行
-
-构建需要 JDK 17 或更新版本、Android SDK Platform 37.0、Build Tools 37.0.0、NDK r29
-（29.0.14206865）、CMake、原生构建工具、Git、`curl`、`unzip` 和稳定版 Rust。
-将 `ANDROID_HOME` 指向 SDK，在项目根目录运行：
+需要稳定版 Rust、JDK 17 或更新版本、Android SDK Platform 37.0、Build Tools 37.0.0、
+NDK r29（29.0.14206865）、CMake、原生构建工具、Git、`curl` 和 `unzip`。
+将 `ANDROID_HOME` 指向已安装的 SDK，然后在项目根目录运行以下命令。
 
 ```bash
 rustup target add aarch64-linux-android
 ./build.sh
 ```
 
-脚本初始化 Git 子模块、编译 JNI 和 Kotlin 应用，并检查 APK 的文件清单。产物为
-`app/build/outputs/apk/debug/app-debug.apk`。可用 `ORT_ARCHIVE_DIR` 复用 ORT 1.30.0
-AAR，或用 `TTS_DEBUG_KEYSTORE` 指定调试签名。
+脚本初始化 Git 子模块、构建 JNI 与 Kotlin 应用，并检查 APK 内容。产物位于
+`app/build/outputs/apk/debug/app-debug.apk`。`ORT_ARCHIVE_DIR` 可复用 ORT 1.30.0 AAR；
+`TTS_DEBUG_KEYSTORE` 可沿用已有的调试签名。
 
-设备需支持 `arm64-v8a` 和 Android 9 或更新版本。先安装 APK，再把声音包传到手机。
+## 模型目录
 
-```bash
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-adb push /path/to/bailu-android-mobile.zip /sdcard/Download/
-```
+公开的 `mobile/` 已包含流式和整段两种图，App 直接读取推送后的目录。自定义模型可用
+[导出工具](vendor/gpt-sovits-onnx-rs/scripts/README.md)准备，以 `vits.onnx` 命名流式图，
+以 `vits_non_streaming.onnx` 命名同权重导出的整段图。`g2p_en/`、`vits_ref.onnx`
+和模型引用的外部权重按原目录结构放置。
 
-打开 **GPT-SoVITS TTS**，导入 ZIP。包内有参考音时即可开始试听；也可在页面底部的「参考音」
-提供自己的 WAV 和转录。要测试系统调用，点「系统 TTS」，将 **GPT-SoVITS TTS** 设为首选引擎，
-再用系统的「播放」播放示例。
+模型目录还支持这几个可选文件。
 
-## 性能口径
+- `reference.wav` 与 `reference.txt` 为配对的参考音和 UTF-8 转录。建议使用 3–10 秒的
+  单声道 PCM16 WAV。也可在载入模型后，从 App 内选择参考音。
+- `reference_name.txt` 为参考音的显示名称。
+- `infer_params.json` 为采样参数。复测时可在其中固定随机种子。
 
-「首块 PCM」从服务收到合成请求计到首块交付。「合成与交付」计到最后一块 PCM 交付完成，
-包含当次模型准备和 Android 回调耗时。RTF 等于这一耗时除以音频时长。比较两种模式时，
-请使用同一参考音、同一输入文本和固定的采样种子。
+真机验证使用 Bailu Android 部署的 v2Pro `mobile` 模型，以及筛选后的 `bailu-09.wav` 和配套转录。
 
-[Android TTS 服务接口](https://developer.android.com/reference/android/speech/tts/TextToSpeechService) ·
-[引擎与模型导出](https://github.com/bailu-obj/gpt-sovits-onnx-rs)
+## 实现与计时
+
+界面使用 Kotlin 和 Compose Material 3。应用内试听和其他 Android App 都通过系统
+`TextToSpeech` 访问同一个服务。服务经 JNI 调用固定到 `b0f2c5a` 的 Rust 引擎，返回
+32 kHz 单声道 PCM16。流式模式从 16 个语义 token 起步，整段模式在完成合成后交付 PCM。
+
+性能卡片在原生引擎完成合成时更新。「引擎首块 PCM」从推理开始计到模型生成首块 PCM，
+「引擎合成耗时」计到推理返回。推理 RTF 是引擎合成耗时除以生成的 PCM 时长。
+模型和参考音准备在计时开始前完成。PCM 转换与 Android 播放在接收线程上进行，
+原生引擎将单次请求生成的音频送入独立队列，可在播放期间继续推理。

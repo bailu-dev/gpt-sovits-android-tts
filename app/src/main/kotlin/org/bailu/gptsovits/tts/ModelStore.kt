@@ -4,14 +4,8 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Log
-import java.io.BufferedInputStream
 import java.io.File
-import java.io.FilterInputStream
-import java.io.InputStream
 import java.nio.file.Files
-import java.nio.file.Path
-import java.nio.file.StandardOpenOption
-import java.util.zip.ZipInputStream
 
 internal enum class SynthesisMode(val label: String) {
     Streaming("流式"), Complete("整段"),
@@ -31,18 +25,14 @@ internal data class ModelSelection(
     val ready: Boolean get() = bundle != null && reference != null
 }
 
-internal data class LoadProgress(val label: String, val fraction: Float? = null)
-
 internal object ModelStore {
     val engineLock = Any()
-    private val importLock = Any()
     private const val BUNDLE_KEY = "active_bundle"
+    private const val PUSHED_MODEL_KEY = "active_pushed_model"
     private const val REFERENCE_KEY = "active_reference"
     private const val MODEL_NAME_KEY = "model_name"
     private const val MODE_KEY = "mode"
-    private const val MAX_BYTES = 8L * 1024 * 1024 * 1024
     private const val MAX_WAV = 16L * 1024 * 1024
-    private const val MAX_ENTRIES = 2048
     private const val MAX_TEXT = 64 * 1024
     private val required = listOf(
         "vits.onnx", "vits_ref.onnx", "ssl.onnx", "sv.onnx", "bert.onnx", "g2pW.onnx",
@@ -52,14 +42,20 @@ internal object ModelStore {
 
     fun selection(context: Context): ModelSelection {
         val prefs = preferences(context)
-        val bundle = prefs.getString(BUNDLE_KEY, null)
-            ?.let { File(models(context), it) }?.takeIf(File::isDirectory)
+        val pushed = prefs.getString(PUSHED_MODEL_KEY, null)
+        val bundle = if (pushed != null) {
+            pushedModel(modelDirectory(context), pushed)
+        } else {
+            // An existing private model remains usable until a folder is selected.
+            prefs.getString(BUNDLE_KEY, null)
+                ?.let { File(context.filesDir.resolve("models"), it) }?.takeIf(File::isDirectory)
+        }
         val complete = bundle?.resolve("vits_non_streaming.onnx")?.let(::hasData) == true
         val bundled = bundle?.let(::bundledReference)
         val custom = customReference(context)
         return ModelSelection(
             bundle,
-            if (bundle != null) prefs.getString(MODEL_NAME_KEY, "v2Pro 声音包") else null,
+            if (bundle != null) pushed ?: prefs.getString(MODEL_NAME_KEY, "v2Pro 声音包") else null,
             custom ?: bundled,
             bundled,
             custom != null,
@@ -69,57 +65,49 @@ internal object ModelStore {
         )
     }
 
-    fun installModel(context: Context, uri: Uri, report: (LoadProgress) -> Unit) {
-        synchronized(importLock) {
-            val root = models(context).apply { mkdirs() }
-            val previous = selection(context).bundle
-            root.listFiles { _, name -> name.startsWith("bundle-") }
-                ?.filter { it != previous }
-                ?.forEach(::cleanUp)
-            val candidate = Files.createTempDirectory(root.toPath(), "bundle-").toFile()
-            var installed = false
-            try {
-                val total = query(context, uri, OpenableColumns.SIZE)?.toLongOrNull()?.takeIf { it > 0 }
-                val name = displayName(context, uri, "GPT-SoVITS 声音包")
-                context.contentResolver.openInputStream(uri)?.use {
-                    unzip(it, candidate.toPath(), total, report)
-                } ?: error("无法打开模型 ZIP")
-                required.forEach { require(hasData(candidate.resolve(it))) { "声音包缺少 $it" } }
-                val packaged = bundledReference(candidate)
-                require(packaged != null ||
-                    !candidate.resolve("reference.wav").exists() && !candidate.resolve("reference.txt").exists()) {
-                    "声音包的参考音需要 WAV 和准确转录"
-                }
+    fun modelDirectory(context: Context): File? =
+        context.getExternalFilesDir(null)?.resolve("models")
 
-                report(LoadProgress("载入模型并准备参考音"))
-                synchronized(engineLock) {
-                    NativeEngine.prepare(
-                        context, candidate, customReference(context) ?: packaged, SynthesisMode.Streaming,
-                    )
-                    val prefs = preferences(context)
-                    val oldName = prefs.getString(MODEL_NAME_KEY, null)
-                    val oldMode = prefs.getString(MODE_KEY, null)
-                    val stored = prefs.edit().putString(BUNDLE_KEY, candidate.name)
-                        .putString(MODEL_NAME_KEY, name).putString(MODE_KEY, SynthesisMode.Streaming.name)
-                        .commit()
-                    if (!stored) {
-                        prefs.edit().putString(BUNDLE_KEY, previous?.name)
-                            .putString(MODEL_NAME_KEY, oldName).putString(MODE_KEY, oldMode).commit()
-                        error("无法保存已选模型")
-                    }
-                    installed = true
-                    previous?.let(::cleanUp)
-                }
-            } finally {
-                if (!installed) cleanUp(candidate)
+    fun pushedModels(context: Context): List<String> {
+        val root = modelDirectory(context)?.apply { mkdirs() } ?: return emptyList()
+        return root.list().orEmpty().filter { pushedModel(root, it) != null }.sorted()
+    }
+
+    fun loadPushedModel(context: Context, name: String) {
+        synchronized(engineLock) {
+            val candidate = requireNotNull(pushedModel(modelDirectory(context), name)) {
+                "找不到模型文件夹 $name"
+            }
+            required.forEach { require(hasData(candidate.resolve(it))) { "模型文件夹缺少 $it" } }
+            val packaged = bundledReference(candidate)
+            require(packaged != null ||
+                !candidate.resolve("reference.wav").exists() && !candidate.resolve("reference.txt").exists()) {
+                "声音包的参考音需要 WAV 和准确转录"
+            }
+
+            val prefs = preferences(context)
+            val previous = prefs.getString(PUSHED_MODEL_KEY, null)
+            val previousMode = prefs.getString(MODE_KEY, null)
+            val mode = if (previousMode == SynthesisMode.Complete.name &&
+                hasData(candidate.resolve("vits_non_streaming.onnx"))) SynthesisMode.Complete
+                else SynthesisMode.Streaming
+            NativeEngine.prepare(context, candidate, customReference(context) ?: packaged, mode)
+            if (!prefs.edit().putString(PUSHED_MODEL_KEY, name).putString(MODE_KEY, mode.name).commit()) {
+                prefs.edit().putString(PUSHED_MODEL_KEY, previous).putString(MODE_KEY, previousMode).commit()
+                error("无法保存已选模型")
             }
         }
+    }
+
+    private fun pushedModel(root: File?, name: String): File? {
+        if (root == null || name.isBlank() || name.startsWith('.') || '/' in name || '\\' in name) return null
+        return root.resolve(name).takeIf { it.isDirectory && it.canonicalFile.parentFile == root.canonicalFile }
     }
 
     fun installReference(context: Context, uri: Uri?, transcript: String) {
         synchronized(engineLock) {
             val current = selection(context)
-            val bundle = requireNotNull(current.bundle) { "请先导入模型" }
+            val bundle = requireNotNull(current.bundle) { "请先载入模型" }
             val text = transcript.trim()
             require(text.isNotEmpty() && text.toByteArray().size <= MAX_TEXT) { "请填写参考音的准确转录" }
             val root = references(context).apply { mkdirs() }
@@ -164,7 +152,7 @@ internal object ModelStore {
     fun selectMode(context: Context, mode: SynthesisMode) {
         synchronized(engineLock) {
             val current = selection(context)
-            val bundle = requireNotNull(current.bundle) { "请先导入模型" }
+            val bundle = requireNotNull(current.bundle) { "请先载入模型" }
             require(mode != SynthesisMode.Complete || current.completeAvailable) {
                 "声音包需要包含 vits_non_streaming.onnx"
             }
@@ -180,7 +168,7 @@ internal object ModelStore {
     fun useBundledReference(context: Context) {
         synchronized(engineLock) {
             val current = selection(context)
-            val bundle = requireNotNull(current.bundle) { "请先导入模型" }
+            val bundle = requireNotNull(current.bundle) { "请先载入模型" }
             val reference = requireNotNull(current.bundledReference) { "当前模型没有提供参考音" }
             NativeEngine.prepare(context, bundle, reference, current.mode)
             val prefs = preferences(context)
@@ -222,55 +210,7 @@ internal object ModelStore {
         return if (transcript.isEmpty()) null else ReferenceVoice(wav, transcript, name)
     }
 
-    private fun unzip(source: InputStream, root: Path, size: Long?, report: (LoadProgress) -> Unit) {
-        val counted = object : FilterInputStream(source) {
-            var consumed = 0L
-            override fun read(): Int = super.read().also { if (it != -1) consumed++ }
-            override fun read(bytes: ByteArray, offset: Int, length: Int): Int =
-                super.read(bytes, offset, length).also { if (it > 0) consumed += it }
-        }
-        var lastPercent = -1
-        var total = 0L
-        var entries = 0
-        val buffer = ByteArray(128 * 1024)
-        report(LoadProgress("解压模型", size?.let { 0f }))
-        ZipInputStream(BufferedInputStream(counted)).use { zip ->
-            while (true) {
-                val entry = zip.nextEntry ?: break
-                val file = root.resolve(entry.name).normalize()
-                require(++entries <= MAX_ENTRIES && file.startsWith(root) && file != root &&
-                    '\\' !in entry.name && !entry.name.startsWith("/")) {
-                    "声音包包含无效路径或文件过多"
-                }
-                if (entry.isDirectory) {
-                    Files.createDirectories(file)
-                    require(zip.read() == -1) { "ZIP 目录项包含数据" }
-                } else {
-                    Files.createDirectories(file.parent)
-                    Files.newOutputStream(file, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE).use { out ->
-                        while (true) {
-                            val count = zip.read(buffer)
-                            if (count == -1) break
-                            total += count
-                            require(total <= MAX_BYTES) { "解压后的模型包超过 8 GiB" }
-                            out.write(buffer, 0, count)
-                            if (size != null) {
-                                val percent = (counted.consumed * 100 / size).toInt().coerceIn(0, 100)
-                                if (lastPercent != percent) {
-                                    lastPercent = percent
-                                    report(LoadProgress("解压模型", percent / 100f))
-                                }
-                            }
-                        }
-                    }
-                }
-                zip.closeEntry()
-            }
-        }
-    }
-
     private fun hasData(file: File): Boolean = file.isFile && file.length() > 0
-    private fun models(context: Context) = File(context.filesDir, "models")
     private fun references(context: Context) = File(context.filesDir, "references")
     private fun preferences(context: Context) = context.getSharedPreferences("tts_models", Context.MODE_PRIVATE)
 

@@ -1,7 +1,6 @@
 package org.bailu.gptsovits.tts
 
 import android.media.AudioFormat
-import android.os.SystemClock
 import android.speech.tts.SynthesisCallback
 import android.speech.tts.SynthesisRequest
 import android.speech.tts.TextToSpeech
@@ -16,12 +15,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 internal data class SynthesisMetrics(
     val mode: SynthesisMode,
     val origin: String,
-    val firstPcmMs: Long,
-    val deliveryMs: Long,
+    val firstPcmNanos: Long,
+    val synthesisNanos: Long,
     val frames: Long,
 ) {
     val audioSeconds: Double get() = frames.toDouble() / NativeEngine.SAMPLE_RATE
-    val realTimeFactor: Double get() = deliveryMs / (1000.0 * audioSeconds)
+    val firstPcmMs: Long get() = (firstPcmNanos + 500_000) / 1_000_000
+    val synthesisMs: Long get() = (synthesisNanos + 500_000) / 1_000_000
+    val realTimeFactor: Double get() = synthesisNanos / (1_000_000_000.0 * audioSeconds)
 }
 
 class SpeechService : TextToSpeechService() {
@@ -76,7 +77,6 @@ class SpeechService : TextToSpeechService() {
     override fun onSynthesizeText(request: SynthesisRequest, callback: SynthesisCallback) {
         val cancelled = AtomicBoolean()
         active.set(cancelled)
-        val startedAt = SystemClock.elapsedRealtime()
         try {
             val text = request.charSequenceText?.toString()?.trim().orEmpty()
             if (text.isEmpty() || text.length > TextToSpeech.getMaxSpeechInputLength()) {
@@ -90,21 +90,18 @@ class SpeechService : TextToSpeechService() {
                     callback.error(TextToSpeech.ERROR_NOT_INSTALLED_YET)
                     return
                 }
+                metrics.value = null
                 if (callback.start(NativeEngine.SAMPLE_RATE, AudioFormat.ENCODING_PCM_16BIT, 1) !=
                     TextToSpeech.SUCCESS) return
                 NativeEngine.prepare(this, model.bundle, model.reference, model.mode)
                 if (cancelled.get()) return
-                val sink = PcmDelivery(cancelled, callback, startedAt)
+                val origin = if (request.callerUid == applicationInfo.uid) "应用试听" else "系统 TTS"
+                val sink = PcmDelivery(cancelled, callback) { firstPcm, synthesis, frames ->
+                    metrics.value = SynthesisMetrics(model.mode, origin, firstPcm, synthesis, frames)
+                }
                 NativeEngine.stream(text, sink)
-                if (!cancelled.get() && !sink.failed) {
-                    if (sink.frames == 0L) callback.error(TextToSpeech.ERROR_SYNTHESIS)
-                    else metrics.value = SynthesisMetrics(
-                        model.mode,
-                        if (request.callerUid == applicationInfo.uid) "应用试听" else "系统 TTS",
-                        sink.firstPcmMs,
-                        SystemClock.elapsedRealtime() - startedAt,
-                        sink.frames,
-                    )
+                if (!cancelled.get() && !sink.failed && !sink.wroteAudio) {
+                    callback.error(TextToSpeech.ERROR_SYNTHESIS)
                 }
             }
         } catch (error: RuntimeException) {
@@ -125,35 +122,33 @@ class SpeechService : TextToSpeechService() {
     private class PcmDelivery(
         private val cancelled: AtomicBoolean,
         private val callback: SynthesisCallback,
-        private val startedAt: Long,
+        private val publishMetrics: (Long, Long, Long) -> Unit,
     ) : NativeEngine.PcmSink {
         private val limit = (callback.maxBufferSize and -2).also {
             check(it > 0) { "TTS PCM buffer is too small" }
         }
-        var frames = 0L
-            private set
-        var firstPcmMs = 0L
+        var wroteAudio = false
             private set
         var failed = false
             private set
 
         override fun isCancelled(): Boolean = cancelled.get()
 
+        override fun onMeasured(firstPcmNanos: Long, synthesisNanos: Long, frames: Long) {
+            if (!cancelled.get()) publishMetrics(firstPcmNanos, synthesisNanos, frames)
+        }
+
         override fun write(pcm: ByteArray): Boolean {
             var offset = 0
             while (offset < pcm.size) {
                 if (cancelled.get()) return false
                 val count = minOf(limit, pcm.size - offset)
-                val arrival = SystemClock.elapsedRealtime() - startedAt
                 when (callback.audioAvailable(pcm, offset, count)) {
                     TextToSpeech.STOPPED -> {
                         cancelled.set(true)
                         return false
                     }
-                    TextToSpeech.SUCCESS -> {
-                        if (frames == 0L) firstPcmMs = arrival
-                        frames += count / 2
-                    }
+                    TextToSpeech.SUCCESS -> wroteAudio = true
                     else -> {
                         failed = true
                         callback.error(TextToSpeech.ERROR_OUTPUT)

@@ -2,8 +2,6 @@
 <resources>
     <string name="app_name">GPT-SoVITS TTS</string>
     <string name="title">语音试听</string>
-    <string name="import_model">导入模型 ZIP</string>
-    <string name="replace_model">更换模型 ZIP</string>
     <string name="model_missing">请先导入含参考音和转录的 v2Pro 流式模型包。</string>
     <string name="model_ready">模型已就绪 · 本地合成</string>
     <string name="model_importing">正在导入并校验模型…</string>

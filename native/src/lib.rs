@@ -10,9 +10,9 @@ use std::{
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering::Relaxed},
-        mpsc::{RecvTimeoutError, sync_channel},
+        mpsc::{RecvTimeoutError, channel},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 struct Engine {
@@ -99,21 +99,21 @@ fn stream_pcm(
     sink: &JObject<'_>,
 ) -> Result<()> {
     let cancelled = AtomicBool::new(false);
-    let (send, receive) = sync_channel(1);
+    // Keep playback backpressure and PCM conversion off the inference worker.
+    // At most one utterance is queued, and dropping the receiver releases it on stop.
+    let (send, receive) = channel::<Vec<f32>>();
     let cancelled = &cancelled;
+    let jvm = env.get_java_vm()?;
+    let reporter = env.new_global_ref(sink)?;
 
     std::thread::scope(|scope| {
         let worker = scope.spawn(move || -> Result<()> {
-            let emit = |samples: &[f32]| {
-                let mut pcm = Vec::with_capacity(samples.len() * 2);
-                for sample in samples {
-                    let value = (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
-                    pcm.extend_from_slice(&value.to_le_bytes());
-                }
-                send.send(pcm).is_ok()
-            };
             let sampling = engine.params.to_sampling_params();
             let postprocess = PostprocessParams::default();
+            let start = Instant::now();
+            let mut first_pcm = None;
+            let mut frames = 0;
+            let elapsed;
             if engine.streaming {
                 engine.model.synthesize_token_chunks_sync(
                     text,
@@ -125,37 +125,73 @@ fn stream_pcm(
                         vits_left_context_tokens: None,
                     },
                     || cancelled.load(Relaxed),
-                    |_, samples| emit(&samples),
+                    |_, samples| {
+                        first_pcm.get_or_insert_with(|| start.elapsed());
+                        frames += samples.len();
+                        send.send(samples).is_ok()
+                    },
                 )?;
+                elapsed = start.elapsed();
             } else if !cancelled.load(Relaxed) {
                 let (_, samples) =
                     engine
                         .model
                         .synthesize_sync(text, sampling, LangId::Auto, postprocess)?;
-                for chunk in samples.chunks(8192) {
-                    if cancelled.load(Relaxed) || !emit(chunk) {
-                        break;
-                    }
+                elapsed = start.elapsed();
+                first_pcm = Some(elapsed);
+                frames = samples.len();
+                if send.send(samples).is_err() {
+                    return Ok(());
                 }
+            } else {
+                return Ok(());
+            }
+
+            if let Some(first_pcm) = first_pcm
+                && frames > 0
+                && !cancelled.load(Relaxed)
+            {
+                // Only the measurement reaches Kotlin here. Android audio callbacks
+                // stay on the original synthesis thread below.
+                jvm.attach_current_thread()?.call_method(
+                    reporter.as_obj(),
+                    "onMeasured",
+                    "(JJJ)V",
+                    &[
+                        JValue::Long(first_pcm.as_nanos() as i64),
+                        JValue::Long(elapsed.as_nanos() as i64),
+                        JValue::Long(frames as i64),
+                    ],
+                )?;
             }
             Ok(())
         });
 
         // Android requires SynthesisCallback calls on its original synthesis thread.
         let delivery = (|| -> Result<()> {
+            const CONVERSION_FRAMES: usize = 8192;
+            let mut pcm = Vec::with_capacity(CONVERSION_FRAMES * 2);
             loop {
                 if env.call_method(sink, "isCancelled", "()Z", &[])?.z()? {
                     break;
                 }
                 match receive.recv_timeout(Duration::from_millis(20)) {
-                    Ok(pcm) => {
-                        let accepted = env.with_local_frame(8, |env| {
-                            let bytes = JObject::from(env.byte_array_from_slice(&pcm)?);
-                            env.call_method(sink, "write", "([B)Z", &[JValue::Object(&bytes)])?
-                                .z()
-                        })?;
-                        if !accepted {
-                            break;
+                    Ok(samples) => {
+                        for chunk in samples.chunks(CONVERSION_FRAMES) {
+                            pcm.clear();
+                            for sample in chunk {
+                                let value =
+                                    (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+                                pcm.extend_from_slice(&value.to_le_bytes());
+                            }
+                            let accepted = env.with_local_frame(8, |env| {
+                                let bytes = JObject::from(env.byte_array_from_slice(&pcm)?);
+                                env.call_method(sink, "write", "([B)Z", &[JValue::Object(&bytes)])?
+                                    .z()
+                            })?;
+                            if !accepted {
+                                return Ok(());
+                            }
                         }
                     }
                     Err(RecvTimeoutError::Timeout) => {}

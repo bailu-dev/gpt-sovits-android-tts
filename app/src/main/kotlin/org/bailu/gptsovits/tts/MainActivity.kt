@@ -42,14 +42,10 @@ class MainActivity : ComponentActivity() {
     private var request by mutableStateOf<String?>(null)
     private var sequence = 0L
     private var selection by mutableStateOf<ModelSelection?>(null)
+    private var modelFolders by mutableStateOf<List<String>?>(null)
     private var referenceDraft by mutableStateOf<ReferenceDraft?>(null)
-    private val work = MutableStateFlow<LoadProgress?>(null)
+    private val work = MutableStateFlow<String?>(null)
 
-    private val pickModel = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) runWork("准备导入模型") { context ->
-            ModelStore.installModel(context, uri) { work.value = it }
-        }
-    }
     private val pickReference = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val draft = referenceDraft
         if (uri != null && draft != null) {
@@ -83,7 +79,8 @@ class MainActivity : ComponentActivity() {
                     previewing = request != null,
                     message = message,
                     metrics = metrics,
-                    onPickModel = { pickModel.launch(arrayOf("application/zip", "application/octet-stream")) },
+                    onPickModel = ::showModelFolders,
+                    onOpenProject = ::openProject,
                     onSpeak = ::speak,
                     onStop = ::stopPlayback,
                     onSystemSettings = ::openTtsSettings,
@@ -103,6 +100,18 @@ class MainActivity : ComponentActivity() {
                     },
                     onPlayReference = { model.reference?.audio?.let(::playReference) },
                 )
+                modelFolders?.let { folders ->
+                    ModelFolderDialog(
+                        directory = ModelStore.modelDirectory(this)?.absolutePath.orEmpty(),
+                        folders = folders,
+                        onRefresh = ::showModelFolders,
+                        onDismiss = { modelFolders = null },
+                        onSelect = { name ->
+                            modelFolders = null
+                            runWork("载入模型并准备参考音") { ModelStore.loadPushedModel(it, name) }
+                        },
+                    )
+                }
                 val draft = referenceDraft
                 if (draft != null) {
                     ReferenceDialog(
@@ -125,6 +134,20 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         if (work.value == null) selection = ModelStore.selection(this)
+    }
+
+    private fun showModelFolders() {
+        modelFolders = ModelStore.pushedModels(this)
+    }
+
+    private fun openProject() {
+        try {
+            startActivity(Intent(
+                Intent.ACTION_VIEW, Uri.parse("https://github.com/bailu-obj/gpt-sovits-onnx-rs"),
+            ))
+        } catch (_: ActivityNotFoundException) {
+            message = "请在浏览器中打开 github.com/bailu-obj/gpt-sovits-onnx-rs。"
+        }
     }
 
     private fun onConnected(code: Int) {
@@ -223,7 +246,7 @@ class MainActivity : ComponentActivity() {
     private fun runWork(label: String, action: (android.content.Context) -> Unit) {
         if (work.value != null) return
         stopPlayback()
-        work.value = LoadProgress(label)
+        work.value = label
         message = ""
         val context = applicationContext
         lifecycleScope.launch {

@@ -13,6 +13,7 @@ internal object NativeEngine {
     interface PcmSink {
         fun isCancelled(): Boolean
         fun write(pcm: ByteArray): Boolean
+        fun onMeasured(firstPcmNanos: Long, synthesisNanos: Long, frames: Long)
     }
 
     fun prepare(context: Context, bundle: File, voice: ReferenceVoice?, mode: SynthesisMode) {

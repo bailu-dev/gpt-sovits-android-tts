@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
@@ -48,12 +49,13 @@ import java.util.Locale
 @Composable
 internal fun WorkspaceScreen(
     model: ModelSelection,
-    progress: LoadProgress?,
+    progress: String?,
     canSpeak: Boolean,
     previewing: Boolean,
     message: String,
     metrics: SynthesisMetrics?,
     onPickModel: () -> Unit,
+    onOpenProject: () -> Unit,
     onSpeak: (String, Boolean) -> Unit,
     onStop: () -> Unit,
     onSystemSettings: () -> Unit,
@@ -70,8 +72,11 @@ internal fun WorkspaceScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("GPT-SoVITS") },
-                actions = { TextButton(onClick = onSystemSettings) { Text("系统 TTS") } },
+                title = { Text(stringResource(R.string.app_name)) },
+                actions = {
+                    TextButton(onClick = onOpenProject) { Text("原项目") }
+                    TextButton(onClick = onSystemSettings) { Text("系统 TTS") }
+                },
             )
         },
     ) { insets ->
@@ -83,22 +88,17 @@ internal fun WorkspaceScreen(
             ) {
                 Panel("模型") {
                     Text(
-                        model.name ?: "导入 v2Pro 流式声音包以开始",
+                        model.name ?: "通过 ADB 推送 v2Pro 模型文件夹后载入",
                         style = MaterialTheme.typography.bodyMedium,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
                     if (progress != null) {
-                        val percent = progress.fraction?.let { " · ${(it * 100).toInt()}%" }.orEmpty()
-                        Text(progress.label + percent, Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-                        if (progress.fraction != null) {
-                            LinearProgressIndicator(progress = { progress.fraction }, modifier = Modifier.fillMaxWidth())
-                        } else {
-                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                        }
+                        Text(progress, Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                     }
                     FilledTonalButton(onClick = onPickModel, enabled = !working) {
-                        Text(if (model.bundle != null) "更换模型 ZIP" else "导入模型 ZIP")
+                        Text("选择模型文件夹")
                     }
                 }
                 Panel("试听与性能") {
@@ -173,19 +173,53 @@ internal fun WorkspaceScreen(
 }
 
 @Composable
+internal fun ModelFolderDialog(
+    directory: String,
+    folders: List<String>,
+    onRefresh: () -> Unit,
+    onDismiss: () -> Unit,
+    onSelect: (String) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("选择模型文件夹") },
+        text = {
+            Column(
+                Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (directory.isEmpty()) {
+                    Text("应用的外部文件目录暂不可用。")
+                } else {
+                    Text(directory, style = MaterialTheme.typography.bodySmall)
+                    if (folders.isEmpty()) Text("通过 ADB 推送模型文件夹，然后刷新。")
+                }
+                folders.forEach { name ->
+                    TextButton(onClick = { onSelect(name) }, modifier = Modifier.fillMaxWidth()) {
+                        Text(name, modifier = Modifier.fillMaxWidth())
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onRefresh) { Text("刷新") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+    )
+}
+
+@Composable
 private fun LatestSynthesis(metrics: SynthesisMetrics?) {
     if (metrics == null) {
-        Text("播放后显示首块 PCM、耗时、音频时长和实时率。", style = MaterialTheme.typography.bodySmall)
+        Text("合成完成后显示引擎延迟、耗时、音频时长和 RTF。", style = MaterialTheme.typography.bodySmall)
         return
     }
     Text("${metrics.origin} · ${metrics.mode.label}", style = MaterialTheme.typography.labelMedium)
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Metric("首块 PCM", "${metrics.firstPcmMs} ms", Modifier.weight(1f))
-        Metric("合成与交付", "${metrics.deliveryMs} ms", Modifier.weight(1f))
+        Metric("引擎首块 PCM", "${metrics.firstPcmMs} ms", Modifier.weight(1f))
+        Metric("引擎合成耗时", "${metrics.synthesisMs} ms", Modifier.weight(1f))
     }
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         Metric("音频时长", String.format(Locale.US, "%.2f s", metrics.audioSeconds), Modifier.weight(1f))
-        Metric("实时率 RTF", String.format(Locale.US, "%.2f", metrics.realTimeFactor), Modifier.weight(1f))
+        Metric("推理 RTF", String.format(Locale.US, "%.2f", metrics.realTimeFactor), Modifier.weight(1f))
     }
 }
 
