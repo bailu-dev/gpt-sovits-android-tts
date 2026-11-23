@@ -1,5 +1,7 @@
 # GPT-SoVITS ONNX RS Android Demo
 
+**简体中文** · [English](README.en.md)
+
 这是 [GPT-SoVITS ONNX RS](https://github.com/bailu-obj/gpt-sovits-onnx-rs) 的 Android 示例，
 包含语音试听和系统 TTS 两个入口。可以在 App 里输入文字、
 更换参考音，并比较流式和整段合成的延迟。将它设为系统语音引擎后，阅读器等使用 Android TTS
@@ -48,7 +50,8 @@ rustup target add aarch64-linux-android
 ## 模型目录
 
 公开的 `mobile/` 已包含流式和整段两种图，App 直接读取推送后的目录。自定义模型可用
-[导出工具](vendor/gpt-sovits-onnx-rs/scripts/README.md)准备，以 `vits.onnx` 命名流式图，
+[导出工具](https://github.com/bailu-obj/gpt-sovits-onnx-rs/blob/main/scripts/README.md#从权重导出)准备，
+以 `vits.onnx` 命名流式图，
 以 `vits_non_streaming.onnx` 命名同权重导出的整段图。`g2p_en/`、`vits_ref.onnx`
 和模型引用的外部权重按原目录结构放置。
 
