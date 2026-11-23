@@ -5,7 +5,12 @@
 这是 [GPT-SoVITS ONNX RS](https://github.com/bailu-obj/gpt-sovits-onnx-rs) 的 Android 示例，
 包含语音试听和系统 TTS 两个入口。可以在 App 里输入文字、
 更换参考音，并比较流式和整段合成的延迟。将它设为系统语音引擎后，阅读器等使用 Android TTS
-的应用也会使用同一份模型、参考音和合成模式。App 顶栏的「原项目」打开引擎仓库。
+的应用也会使用同一份模型、参考音和合成模式。
+
+## demo视频
+
+https://github.com/user-attachments/assets/e0f6653e-b9c9-4c94-8fee-7a1f60802c83
+
 
 ## 在手机上使用
 
