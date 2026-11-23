@@ -1,0 +1,13 @@
+[package]
+name = "gpt-sovits-tts"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = "1"
+gpt-sovits-onnx-rs = { path = "../vendor/gpt-sovits-onnx-rs", features = ["shared-ort-pool"] }
+jni = "0.21"
+ort = { version = "=2.0.0-rc.13", features = ["load-dynamic"] }
