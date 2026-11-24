@@ -3,7 +3,7 @@
 [简体中文](README.md) · **English**
 
 This is the Android demo for
-[GPT-SoVITS ONNX RS](https://github.com/bailu-obj/gpt-sovits-onnx-rs/blob/main/README.en.md). Enter
+[GPT-SoVITS ONNX RS](https://github.com/bailu-dev/gpt-sovits-onnx-rs/blob/main/README.en.md). Enter
 text to preview speech, change the reference voice, and compare streaming and
 whole-utterance latency. You can also set it as the system TTS engine so
 readers and other Android apps use the same model, reference voice, and
@@ -63,7 +63,7 @@ Set `ORT_ARCHIVE_DIR` to reuse the ONNX Runtime 1.30.0 AAR, or
 The published `mobile/` bundle contains both streaming and whole-utterance
 graphs. The app reads the model files directly from the directory pushed
 with `adb`. For custom models, follow the
-[export guide (Chinese)](https://github.com/bailu-obj/gpt-sovits-onnx-rs/blob/main/scripts/README.md#从权重导出).
+[export guide (Chinese)](https://github.com/bailu-dev/gpt-sovits-onnx-rs/blob/main/scripts/README.md#从权重导出).
 Name the streaming graph `vits.onnx` and the whole-utterance graph
 `vits_non_streaming.onnx`. Both graphs should come from the same weights.
 Preserve the paths of `g2p_en/`, `vits_ref.onnx`, and any external weights

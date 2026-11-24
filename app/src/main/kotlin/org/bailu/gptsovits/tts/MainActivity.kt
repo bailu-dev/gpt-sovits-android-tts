@@ -143,10 +143,10 @@ class MainActivity : ComponentActivity() {
     private fun openProject() {
         try {
             startActivity(Intent(
-                Intent.ACTION_VIEW, Uri.parse("https://github.com/bailu-obj/gpt-sovits-onnx-rs"),
+                Intent.ACTION_VIEW, Uri.parse("https://github.com/bailu-dev/gpt-sovits-onnx-rs"),
             ))
         } catch (_: ActivityNotFoundException) {
-            message = "请在浏览器中打开 github.com/bailu-obj/gpt-sovits-onnx-rs。"
+            message = "请在浏览器中打开 github.com/bailu-dev/gpt-sovits-onnx-rs。"
         }
     }
 
